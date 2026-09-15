@@ -1,0 +1,21 @@
+{
+  "name": "continuum",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Deep-analysis automatic DJ mixing engine that runs entirely in the browser",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/run-tests.mjs",
+    "test:browser": "node scripts/browser-check.mjs",
+    "test:audio": "node scripts/make-test-audio.mjs test-audio"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "playwright": "^1.48.0"
+  }
+}
