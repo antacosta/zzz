@@ -209,17 +209,38 @@ export interface Transition {
   score: number;
 }
 
+/**
+ * One track's slot in the mix timeline. All `*At` fields are mix-timeline
+ * seconds; `trackOffset` and `exitTime` are positions inside the track itself.
+ *
+ * A deck's playback rate is not constant: it enters at whatever rate the
+ * previous transition's mix tempo demanded, then glides to the rate its own
+ * outgoing transition needs, the way a DJ nudges the pitch once a blend is done.
+ */
 export interface MixStep {
+  index: number;
   trackId: string;
-  /** time in the master mix timeline where this track's playback starts */
+  trackName: string;
+  /** mix-time the deck starts playing */
   startAt: number;
-  /** offset into the track at `startAt` */
+  /** track time at `startAt` */
   trackOffset: number;
-  /** when this deck stops */
+  /** mix-time the deck stops */
   endAt: number;
+  /** mix-time its outgoing transition begins (equals endAt for the last step) */
+  transitionStartAt: number;
+  /** track time at `transitionStartAt` */
+  exitTime: number;
   transitionIn: Transition | null;
   transitionOut: Transition | null;
-  playbackRate: number;
+  /** rate while the incoming blend is still running */
+  rateIn: number;
+  /** rate for the body of the track and its outgoing blend */
+  rateOut: number;
+  /** mix-time where the rate glides from rateIn to rateOut */
+  rampAt: number;
+  rampSeconds: number;
+  /** loudness-matching trim */
   gainDb: number;
 }
 
