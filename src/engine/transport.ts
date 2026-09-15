@@ -17,6 +17,7 @@ export interface TransportState {
   position: number;
   duration: number;
   activeSteps: ScheduledStep[];
+  /** the step that owns the floor; mid-blend this is the outgoing track */
   currentStep: MixStep | null;
   recording: boolean;
   stemsAvailable: boolean;
@@ -75,6 +76,16 @@ export class Transport {
   async play(): Promise<void> {
     await this.init();
     if (!this.ctx || !this.mixer || !this.plan) return;
+    // Parked at the end of the set: start it again from the top rather than
+    // sitting there doing nothing, which is what pressing play there means.
+    // This cannot test `running`, because a pause deliberately leaves that set
+    // so that resuming continues mid-blend.
+    if (this.pausedPosition >= this.plan.totalDuration - 0.01) {
+      this.pausedPosition = 0;
+      this.running = false;
+      this.mixer.reset();
+      this.mixer.setPlan(this.plan);
+    }
     if (this.ctx.state === "suspended") await this.ctx.resume();
     if (!this.running) {
       this.mixer.setOrigin(this.ctx.currentTime - this.pausedPosition);
@@ -158,7 +169,7 @@ export class Transport {
       position,
       duration: this.plan?.totalDuration ?? 0,
       activeSteps: this.mixer?.activeSteps() ?? [],
-      currentStep: this.mixer?.stepAt(position) ?? null,
+      currentStep: this.mixer?.floorStep(position) ?? null,
       recording: this.recorder?.state === "recording",
       stemsAvailable: this.stemsAvailable,
     };

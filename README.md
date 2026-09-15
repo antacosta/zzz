@@ -138,7 +138,7 @@ dropping files to confirming audio at the master bus:
 ```
 npm run test:audio      # writes synthetic test tracks to test-audio/
 npm run dev             # in another shell
-npm run test:browser    # 27 checks against the running app
+npm run test:browser    # 39 checks against the running app
 ```
 
 Set `CHROME_PATH` to use a Chromium you already have, and `APP_URL` if the dev

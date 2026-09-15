@@ -458,6 +458,7 @@ export class App {
     const next = this.plan.steps[step.index + 1];
     const nextTrack = next ? analyses.get(next.trackId) : undefined;
     const untilBlend = step.transitionStartAt - state.position;
+    const blending = untilBlend <= 0 && step.transitionOut !== null;
 
     el.innerHTML = `
       <h2 class="np-title">${escapeHtml(step.trackName)}</h2>
@@ -475,7 +476,7 @@ export class App {
                ${nextTrack ? `(${fmt.num(nextTrack.grid.bpm, 1)} &middot; ${nextTrack.key.camelot})` : ""}
                &mdash; <span class="kind">${fmt.transitionLabel(step.transitionOut.kind)}</span>
                over ${step.transitionOut.beats / 4} bars
-               ${untilBlend > 0 ? `in <b>${fmt.time(untilBlend)}</b>` : `<b>&mdash; blending now</b>`}
+               ${blending ? `<b>&mdash; blending now</b>` : `in <b>${fmt.time(untilBlend)}</b>`}
                <br /><span style="color:var(--text-faint)">${escapeHtml(step.transitionOut.rationale)}</span>
              </div>`
           : `<div class="np-next">Final track of the set.</div>`

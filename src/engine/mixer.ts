@@ -106,7 +106,7 @@ export class Mixer {
     return [...this.active.values()].sort((a, b) => a.step.index - b.step.index);
   }
 
-  /** The step that should be sounding at a mix time, for seeking and the UI. */
+  /** The last step to have started by a mix time. */
   stepAt(mixTime: number): MixStep | null {
     if (!this.plan) return null;
     let found: MixStep | null = null;
@@ -115,6 +115,22 @@ export class Mixer {
       else break;
     }
     return found;
+  }
+
+  /**
+   * The step that owns the floor: the most recent one whose incoming blend has
+   * finished. Mid-blend that is the outgoing track, which is the one a DJ would
+   * call the current track — the incoming one is still arriving.
+   */
+  floorStep(mixTime: number): MixStep | null {
+    if (!this.plan) return null;
+    let found: MixStep | null = null;
+    for (const s of this.plan.steps) {
+      const inbound = s.transitionIn ? (s.transitionIn.beats * 60) / s.transitionIn.mixBpm : 0;
+      if (s.startAt + inbound <= mixTime) found = s;
+      else break;
+    }
+    return found ?? this.plan.steps[0] ?? null;
   }
 
   /**

@@ -7,7 +7,7 @@
  * without hardware and the render quantum advances normally.
  */
 import { chromium } from "playwright";
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 // Usage: npm run dev, then
@@ -195,6 +195,18 @@ check("skip jumps forward to the next blend", afterSkip > beforeSkip + 10,
 check("two decks run through a blend", await page.locator(".deck").count() >= 2,
   `${await page.locator(".deck").count()} decks`);
 
+// Mid-blend the floor still belongs to the outgoing track, so that is what the
+// header must name; the incoming one is the "next".
+const blendHeader = (await page.locator("#nowplaying").innerText()).replace(/\n/g, " | ");
+const deckNames = await page.$$eval(".deck .deck-name", (els) => els.map((e) => e.textContent ?? ""));
+check("the header names the outgoing track during a blend",
+  deckNames.length >= 2 && blendHeader.startsWith(deckNames[0]),
+  `header "${blendHeader.slice(0, 40)}" vs deck A "${deckNames[0]}"`);
+check("the header names the incoming track as next",
+  deckNames.length >= 2 && blendHeader.includes(`Next: ${deckNames[1]}`),
+  deckNames.join(" -> "));
+check("the header says the blend is in progress", /blending now/.test(blendHeader));
+
 await page.click("#play");
 await page.waitForTimeout(500);
 check("pause works", (await page.$eval("#play", (el) => el.textContent)) === "Play");
@@ -215,6 +227,71 @@ const endState = await page.evaluate(() => ({
 check("playback stops at the end of the set", !endState.playing, endState.readout);
 check("the position never reports past the total",
   endState.position <= total + 0.01, `${endState.position.toFixed(1)} of ${total.toFixed(1)}`);
+
+console.log("\nBrowser: export");
+// Pressing play while parked at the end of the set should restart it.
+const parkedAt = await page.evaluate(() => window.continuum.state().position);
+await page.click("#play");
+await page.waitForTimeout(2500);
+const afterRestart = await page.evaluate(() => window.continuum.state());
+check("play restarts the set from the top when parked at the end",
+  afterRestart.playing && afterRestart.position < parkedAt / 2,
+  `${parkedAt.toFixed(0)}s -> ${afterRestart.position.toFixed(1)}s`);
+
+// Live recording: capture a few seconds of the actual output.
+await page.waitForTimeout(500);
+await page.click("#record");
+await page.waitForTimeout(4000);
+const recordingLabel = await page.$eval("#record", (el) => el.textContent ?? "");
+check("recording starts and the button reflects it", /stop/i.test(recordingLabel), recordingLabel);
+const recDownload = page.waitForEvent("download", { timeout: 30000 }).catch(() => null);
+await page.click("#record");
+const recFile = await recDownload;
+check("recording produces a downloadable file", recFile !== null,
+  recFile ? recFile.suggestedFilename() : "no download event");
+if (recFile) {
+  const path = await recFile.path();
+  const size = path ? statSync(path).size : 0;
+  check("the recording has audio in it", size > 8000, `${(size / 1024).toFixed(0)} KB`);
+}
+
+// Offline render. This is the OfflineAudioContext suspend/resume path, which
+// decodes upcoming tracks and releases finished ones mid-render.
+await page.evaluate(() => { if (window.continuum.state().playing) document.querySelector("#play").click(); });
+const wavDownload = page.waitForEvent("download", { timeout: 240000 }).catch(() => null);
+await page.click("#export");
+const wavFile = await wavDownload;
+check("offline render produces a WAV", wavFile !== null,
+  wavFile ? wavFile.suggestedFilename() : "no download event");
+if (wavFile) {
+  const path = await wavFile.path();
+  const size = path ? statSync(path).size : 0;
+  const total = await page.evaluate(() => window.continuum.plan().totalDuration);
+  // 16-bit stereo at 44.1 kHz is 176.4 kB per second.
+  const expected = total * 44100 * 2 * 2;
+  check("the WAV is the length of the whole set",
+    size > expected * 0.9 && size < expected * 1.2,
+    `${(size / 1024 / 1024).toFixed(1)} MB for ${total.toFixed(0)}s (expected ~${(expected / 1024 / 1024).toFixed(1)} MB)`);
+  // Confirm it is a real RIFF/WAVE file carrying non-silent audio.
+  if (path) {
+    const buf = readFileSync(path);
+    check("the WAV has a valid header",
+      buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WAVE",
+      `${buf.toString("ascii", 0, 4)}/${buf.toString("ascii", 8, 12)}`);
+    let peak = 0;
+    let nonZero = 0;
+    for (let off = 44; off + 1 < buf.length; off += 2) {
+      const v = Math.abs(buf.readInt16LE(off));
+      if (v > 64) nonZero++;
+      if (v > peak) peak = v;
+    }
+    const samples = (buf.length - 44) / 2;
+    check("the rendered mix is not silent", peak > 3000,
+      `peak ${(peak / 32768).toFixed(3)} full scale`);
+    check("the rendered mix has audio throughout", nonZero > samples * 0.5,
+      `${((nonZero / samples) * 100).toFixed(0)}% of samples above the noise floor`);
+  }
+}
 
 console.log("\nBrowser: console cleanliness");
 const ignorable = /favicon|Autoplay|AudioContext was not allowed/i;
