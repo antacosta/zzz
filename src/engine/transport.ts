@@ -58,6 +58,8 @@ export class Transport {
       },
       { useStems: this.stemsAvailable, offline: false },
     );
+    // A plan set before the context existed has to be handed over now.
+    if (this.plan) this.mixer.setPlan(this.plan);
   }
 
   get isReady(): boolean {
@@ -114,12 +116,19 @@ export class Transport {
     }
   }
 
-  /** Jump to the next blend, the way a DJ would cut a track short. */
+  /**
+   * Jump to the next blend, the way a DJ would cut a track short. During the
+   * final track there is nothing to skip to, and jumping to the end of the set
+   * would just land on silence, so this does nothing instead.
+   */
   async skipNext(): Promise<void> {
     if (!this.plan || !this.mixer) return;
     const pos = this.position();
-    const next = this.plan.steps.find((s) => s.transitionStartAt > pos + 0.5);
-    await this.seek(next ? next.transitionStartAt : this.plan.totalDuration);
+    const next = this.plan.steps.find(
+      (s) => s.transitionOut !== null && s.transitionStartAt > pos + 0.5,
+    );
+    if (!next) return;
+    await this.seek(next.transitionStartAt);
   }
 
   async skipPrevious(): Promise<void> {
@@ -135,7 +144,11 @@ export class Transport {
 
   position(): number {
     if (!this.mixer) return this.pausedPosition;
-    return this.isPlaying ? Math.max(0, this.mixer.position()) : this.pausedPosition;
+    const raw = this.isPlaying ? Math.max(0, this.mixer.position()) : this.pausedPosition;
+    // Never report past the end of the set: the context clock keeps running
+    // after the last deck has finished, and a readout that climbs past the
+    // total is just wrong.
+    return this.plan ? Math.min(raw, this.plan.totalDuration) : raw;
   }
 
   state(): TransportState {
@@ -205,7 +218,15 @@ export class Transport {
     if (this.interval !== null) return;
     const tick = () => {
       if (!this.mixer) return;
-      this.mixer.pump(this.mixer.position() + LOOKAHEAD);
+      const position = this.mixer.position();
+      // The set is over: stop rather than leaving the clock running on silence.
+      if (this.plan && position >= this.plan.totalDuration) {
+        void this.pause().then(() => {
+          this.pausedPosition = this.plan?.totalDuration ?? 0;
+        });
+        return;
+      }
+      this.mixer.pump(position + LOOKAHEAD);
     };
     tick();
     this.interval = setInterval(tick, SCHEDULE_INTERVAL_MS);

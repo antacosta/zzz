@@ -91,29 +91,142 @@ check("timelines share a frame rate and length",
 check("energy timeline is 0..1", Array.from(a1.timelines.energy).every((v) => v >= 0 && v <= 1));
 check("mixability scored", a1.mixability > 0.3 && a1.mixability <= 1, `${a1.mixability}`);
 
+// Beat-grid phase accuracy. The synthetic kicks land on exact multiples of the
+// beat starting at t=0, so the grid's offset from truth is directly measurable.
+// This is the measurement everything downstream inherits: a grid that is a
+// fraction of a sixteenth note out makes cue points land wrong and reads as
+// syncopation that is not there.
+section("Beat-grid timing");
+const beatSeconds = 60 / 128;
+const phaseErrors: number[] = [];
+for (const t of Array.from(a1.grid.beats)) {
+  if (t < 20) continue; // skip the intro, which has no kicks to lock to
+  const nearest = Math.round(t / beatSeconds) * beatSeconds;
+  phaseErrors.push(t - nearest);
+}
+phaseErrors.sort((x, y) => x - y);
+const medianPhaseError = phaseErrors[phaseErrors.length >> 1];
+check("beat grid phase error is under 10 ms",
+  Math.abs(medianPhaseError) < 0.01, `${(medianPhaseError * 1000).toFixed(1)} ms`);
+// The worst beat matters as much as the median: a grid that is centred but
+// drifting falls apart at the ends of the track, which is exactly where mix-in
+// and mix-out cues live.
+const worstPhaseError = Math.max(Math.abs(phaseErrors[0]), Math.abs(phaseErrors[phaseErrors.length - 1]));
+check("worst beat is within 25 ms", worstPhaseError < 0.025,
+  `${(worstPhaseError * 1000).toFixed(1)} ms`);
+const firstBeatPhase = a1.grid.firstBeat % beatSeconds;
+check("first beat lands on a kick",
+  Math.min(firstBeatPhase, beatSeconds - firstBeatPhase) < 0.015,
+  `${(Math.min(firstBeatPhase, beatSeconds - firstBeatPhase) * 1000).toFixed(0)} ms off`);
+check("the grid is exactly regular", (() => {
+  // A fitted constant-tempo grid should have no spacing variation at all.
+  const beats = Array.from(a1.grid.beats);
+  if (beats.length < 8) return false;
+  const first = beats[1] - beats[0];
+  return beats.every((t, i) => i === 0 || Math.abs(t - beats[i - 1] - first) < 1e-4);
+})());
+check("tempo is accurate to 0.1%",
+  Math.abs(a1.grid.bpm - 128) / 128 < 0.001, `${a1.grid.bpm} vs 128`);
+// A straight four-on-the-floor with offbeat hats is not a syncopated pattern;
+// a grid that is out of phase is what makes it read as one.
+check("a straight 4/4 pattern reads as low syncopation",
+  a1.rhythm.syncopation < 0.5, `${a1.rhythm.syncopation}`);
+check("a straight pattern reads as little or no swing",
+  a1.rhythm.swing < 0.2, `${a1.rhythm.swing}`);
+check("timelines expose a frame offset of half a window",
+  Math.abs(a1.timelines.frameOffset - 1024 / 22050) < 1e-9,
+  `${(a1.timelines.frameOffset * 1000).toFixed(1)} ms`);
+
 // --- 174 BPM, F# major, no vocal -------------------------------------------
 section("174 BPM / F# major / instrumental");
 const t2 = makeTrack({ bpm: 174, seconds: 45, chord: [54, 58, 61, 66], vocal: false });
 const a2 = analyseTrack({ id: "t2", name: "test-174-fsmaj", ...t2 });
-check("fast bpm detected (or its half)",
-  near(a2.grid.bpm, 174, 2) || near(a2.grid.bpm, 87, 1.5), `got ${a2.grid.bpm}`);
+check("fast tempo is detected at the right metrical level",
+  near(a2.grid.bpm, 174, 1), `got ${a2.grid.bpm}`);
 check("key is F# major or a relative", camelotDistance(a2.key.camelot, camelotFor(6, "major")) <= 1,
   `${a2.key.name} / ${a2.key.camelot}`);
 check("instrumental reads low vocal density", a2.vocalDensity < 0.55, `${a2.vocalDensity}`);
 check("no chord-only track flagged as very wide", a2.stereo.width <= 1);
+// The centroid describes the track's characteristic spectrum, so it has to land
+// inside the band the material actually occupies. Averaging the per-frame
+// centroids instead put it wherever the quiet frames' noise sat.
+for (const [label, a] of [["128 track", a1], ["174 track", a2]] as const) {
+  check(`centroid lands in the occupied band (${label})`,
+    a.spectral.centroidHz > 100 && a.spectral.centroidHz < 6000,
+    `${a.spectral.centroidHz} Hz`);
+  check(`rolloff is above the lowest band edge (${label})`,
+    a.spectral.rolloff85Hz > 120, `${a.spectral.rolloff85Hz} Hz`);
+}
+
+// --- Tempo accuracy across the range ---------------------------------------
+// Three hand-picked tracks do not establish that the tempo estimator works; a
+// sweep does, and tempo is the measurement every other number depends on.
+section("Tempo accuracy sweep (95-174 BPM)");
+const sweepTempos = [95, 100, 110, 118, 120, 124, 127, 128, 135, 140, 150, 174];
+let worstTempoError = 0;
+let worstTempoAt = 0;
+const wrongLevel: number[] = [];
+for (const bpm of sweepTempos) {
+  const track = makeTrack({ bpm, seconds: 40, chord: [48, 51, 55], seed: 12345 });
+  const analysed = analyseTrack({ id: `sweep-${bpm}`, name: `${bpm}`, ...track });
+  const errorPct = Math.abs((analysed.grid.bpm - bpm) / bpm) * 100;
+  if (errorPct > 3) wrongLevel.push(bpm);
+  if (errorPct > worstTempoError) {
+    worstTempoError = errorPct;
+    worstTempoAt = bpm;
+  }
+}
+check("every tempo is found at the right metrical level", wrongLevel.length === 0,
+  wrongLevel.length ? `missed: ${wrongLevel.join(", ")}` : `${sweepTempos.length} tempos`);
+check("worst tempo error across the range is under 0.2%",
+  worstTempoError < 0.2, `${worstTempoError.toFixed(3)}% at ${worstTempoAt} BPM`);
+
+// --- Kick masked by a sustained bassline ------------------------------------
+// A loud sustained note at the kick's own frequency is the normal case in dance
+// music, and it used to defeat the tempo estimator: a transient on top of a
+// large steady level barely moves a compressive flux measure, so the kick went
+// missing from the onset envelope and the tempo landed 2-3% out.
+section("Kick under a sustained bassline");
+for (const [label, chord] of [
+  ["low bass", [43, 46, 50, 55]],
+  ["very low bass", [36, 39, 43]],
+] as [string, number[]][]) {
+  const track = makeTrack({ bpm: 127, seconds: 50, chord, introBars: 2, seed: 303 });
+  const analysed = analyseTrack({ id: `mask-${label}`, name: label, ...track });
+  check(`tempo survives a ${label} under the kick`,
+    near(analysed.grid.bpm, 127, 0.5), `${analysed.grid.bpm} vs 127`);
+  check(`grid fit stays high with a ${label}`,
+    analysed.grid.beatConfidence > 0.7, `fit ${analysed.grid.beatConfidence.toFixed(2)}`);
+}
 
 // --- 44.1 vs 48 kHz agreement ----------------------------------------------
 section("Sample-rate independence (44.1 kHz vs 48 kHz)");
-const t3a = makeTrack({ bpm: 120, seconds: 40, chord: [45, 49, 52], sampleRate: 44100 });
-const t3b = makeTrack({ bpm: 120, seconds: 40, chord: [45, 49, 52], sampleRate: 48000 });
+// Hats off: the noise is drawn per sample, so leaving them in would mean the
+// two rates carry different signals and the comparison would measure the
+// fixture rather than the analysis.
+const t3a = makeTrack({ bpm: 120, seconds: 40, chord: [45, 49, 52], sampleRate: 44100, hats: false });
+const t3b = makeTrack({ bpm: 120, seconds: 40, chord: [45, 49, 52], sampleRate: 48000, hats: false });
 const a3a = analyseTrack({ id: "a", name: "44k", ...t3a });
 const a3b = analyseTrack({ id: "b", name: "48k", ...t3b });
-check("bpm agrees across sample rates", near(a3a.grid.bpm, a3b.grid.bpm, 1),
+check("bpm agrees across sample rates", near(a3a.grid.bpm, a3b.grid.bpm, 0.2),
   `${a3a.grid.bpm} vs ${a3b.grid.bpm}`);
+check("bpm is accurate at both sample rates",
+  near(a3a.grid.bpm, 120, 0.3) && near(a3b.grid.bpm, 120, 0.3),
+  `${a3a.grid.bpm} / ${a3b.grid.bpm} vs 120`);
 check("loudness agrees across sample rates", near(a3a.loudness.integratedLufs, a3b.loudness.integratedLufs, 1.0),
   `${a3a.loudness.integratedLufs} vs ${a3b.loudness.integratedLufs} LUFS`);
 check("key agrees across sample rates", a3a.key.name === a3b.key.name,
   `${a3a.key.name} vs ${a3b.key.name}`);
+check("spectral centroid agrees across sample rates",
+  Math.abs(a3a.spectral.centroidHz - a3b.spectral.centroidHz) <
+    a3a.spectral.centroidHz * 0.05,
+  `${a3a.spectral.centroidHz} vs ${a3b.spectral.centroidHz} Hz`);
+check("brightness agrees across sample rates",
+  Math.abs(a3a.spectral.brightness - a3b.spectral.brightness) < 0.05,
+  `${a3a.spectral.brightness} vs ${a3b.spectral.brightness}`);
+check("band energies agree across sample rates",
+  a3a.spectral.bandsDb.every((db, i) => Math.abs(db - a3b.spectral.bandsDb[i]) < 3),
+  a3a.spectral.bandsDb.map((db, i) => (db - a3b.spectral.bandsDb[i]).toFixed(1)).join(" "));
 
 // --- Mono input and degenerate cases ---------------------------------------
 section("Mono and short input");

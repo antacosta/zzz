@@ -182,7 +182,7 @@ export function estimateKey(chroma: Float32Array[]): KeyEstimate {
     alternates: results.slice(1, 4).map((r) => ({
       name: `${NOTE_NAMES[r.tonic]} ${r.mode === "major" ? "maj" : "min"}`,
       camelot: camelotFor(r.tonic, r.mode),
-      confidence: clamp(r.score, 0, 1),
+      relative: clamp(r.score / (best.score || 1), 0, 1),
     })),
     chroma: Array.from(avg),
     tonalStability: windows ? clamp(agree / windows, 0, 1) : 0,

@@ -74,6 +74,7 @@ export function makeAnalysis(spec: FixtureSpec): TrackAnalysis {
 
   const timelines: Timelines = {
     frameRate: FRAME_RATE,
+    frameOffset: 2048 / 2 / 22050,
     energy, onset, vocal, percussive, bands, centroid, tonalFlux,
   };
 

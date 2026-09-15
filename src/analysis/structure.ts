@@ -10,7 +10,7 @@
  */
 
 import type { BeatGrid, CuePoint, Section, SectionLabel, Timelines } from "../types";
-import { clamp, mean, percentile, smooth } from "./dsp";
+import { clamp, frameToTime, mean, percentile, smooth, timeToFrame } from "./dsp";
 
 interface BarFeature {
   start: number;
@@ -40,8 +40,11 @@ function barFeatures(
   for (let i = 0; i < bounds.length - 1; i++) {
     const start = bounds[i];
     const end = bounds[i + 1];
-    const f0 = Math.max(0, Math.floor(start / tl.frameRate));
-    const f1 = Math.min(tl.energy.length, Math.max(f0 + 1, Math.ceil(end / tl.frameRate)));
+    const f0 = Math.max(0, Math.floor(timeToFrame(start, tl.frameRate, tl.frameOffset)));
+    const f1 = Math.min(
+      tl.energy.length,
+      Math.max(f0 + 1, Math.ceil(timeToFrame(end, tl.frameRate, tl.frameOffset))),
+    );
     const dim = 12 + tl.bands.length + 3;
     const vec = new Float32Array(dim);
 
@@ -288,6 +291,7 @@ export function findCues(
   duration: number,
 ): CuePoint[] {
   const cues: CuePoint[] = [];
+  const toFrame = (t: number): number => timeToFrame(t, tl.frameRate, tl.frameOffset);
   const push = (time: number, kind: CuePoint["kind"], score: number, label: string) => {
     const t = clamp(snapToBar(grid, time), 0, Math.max(0, duration - 0.5));
     if (cues.some((c) => c.kind === kind && Math.abs(c.time - t) < 0.75)) return;
@@ -299,7 +303,7 @@ export function findCues(
   let mixIn = 0;
   for (let f = 0; f < beatOnset.length; f++) {
     if (beatOnset[f] > 0.35 && tl.energy[f] > 0.25) {
-      mixIn = f * tl.frameRate;
+      mixIn = frameToTime(f, tl.frameRate, tl.frameOffset);
       break;
     }
   }
@@ -313,8 +317,8 @@ export function findCues(
   let bestOutScore = -Infinity;
   for (const p of grid.phrases) {
     if (p < duration * 0.5 || p > tailGuard) continue;
-    const f = Math.min(tl.energy.length - 1, Math.round(p / tl.frameRate));
-    const ahead = Math.min(tl.energy.length - 1, Math.round((p + barSeconds * 4) / tl.frameRate));
+    const f = Math.min(tl.energy.length - 1, Math.round(toFrame(p)));
+    const ahead = Math.min(tl.energy.length - 1, Math.round(toFrame(p + barSeconds * 4)));
     // Prefer a point where energy is decaying and vocals are out of the way.
     const s = (tl.energy[f] - tl.energy[ahead]) + (1 - tl.vocal[f]) * 0.5 + (p / duration) * 0.3;
     if (s > bestOutScore) {
@@ -337,7 +341,7 @@ export function findCues(
   const vocalSm = smooth(tl.vocal, Math.max(2, Math.round(0.8 / tl.frameRate)));
   let inVocal = false;
   for (let f = 1; f < vocalSm.length; f++) {
-    const t = f * tl.frameRate;
+    const t = frameToTime(f, tl.frameRate, tl.frameOffset);
     if (!inVocal && vocalSm[f] > 0.45) {
       inVocal = true;
       push(t, "vocal-in", 0.5 + vocalSm[f] * 0.4, "lead vocal enters");
@@ -350,8 +354,8 @@ export function findCues(
   // Loop candidates: 8-bar stretches with very stable energy and no vocal, which
   // are the safe places to hold a groove while the next track arrives.
   for (const p of grid.phrases) {
-    const f0 = Math.round(p / tl.frameRate);
-    const f1 = Math.round((p + barSeconds * 8) / tl.frameRate);
+    const f0 = Math.round(toFrame(p));
+    const f1 = Math.round(toFrame(p + barSeconds * 8));
     if (f1 >= tl.energy.length) break;
     let lo = Infinity;
     let hi = -Infinity;

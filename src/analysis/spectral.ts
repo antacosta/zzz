@@ -87,7 +87,12 @@ export function spectralProfile(spec: Spectrogram, tl: BandTimelines): SpectralP
   }
   if (used > 0) for (let b = 0; b < bins; b++) avg[b] /= used;
 
-  // Rolloff: frequency below which 85 % of the energy sits.
+  // Rolloff: the frequency below which 85 % of the energy sits.
+  //
+  // Note this is a percentile while the centroid below is a weighted mean, so
+  // the two can cross: a spectrum with a long, thin high-frequency tail has
+  // most of its energy low down but a mean pulled upwards by the tail. That is
+  // the standard definition of each and not a contradiction.
   let total = 0;
   for (let b = 1; b < bins; b++) total += avg[b] * avg[b];
   let acc = 0;
@@ -100,7 +105,17 @@ export function spectralProfile(spec: Spectrogram, tl: BandTimelines): SpectralP
     }
   }
 
-  const centroidHz = mean(tl.centroid.filter((v) => v > 0));
+  // Centroid of the same averaged loud-frame spectrum the rolloff uses. Taking
+  // the mean of the per-frame centroids instead would describe a different
+  // thing: quiet frames have a centroid too, it is mostly noise, and it drags
+  // the average somewhere the track never actually sits.
+  let centroidNum = 0;
+  let centroidDen = 0;
+  for (let b = 1; b < bins; b++) {
+    centroidNum += b * binHz * avg[b];
+    centroidDen += avg[b];
+  }
+  const centroidHz = centroidDen > 0 ? centroidNum / centroidDen : 0;
 
   // Bandwidth: energy-weighted spread around the centroid.
   let spread = 0;

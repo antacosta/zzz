@@ -34,8 +34,14 @@ export interface KeyEstimate {
   /** Camelot wheel code, e.g. "8A" */
   camelot: string;
   confidence: number;
-  /** correlation of the second-best candidate, useful for ambiguous tracks */
-  alternates: { name: string; camelot: string; confidence: number }[];
+  /**
+   * Runner-up keys, for tracks whose harmony is ambiguous. `relative` is how
+   * strong each candidate was as a fraction of the winner, so 0.9 means "very
+   * nearly this key instead". It is deliberately on a different scale from
+   * `confidence` above, and named differently, because mixing the two in one
+   * display made the alternates look more likely than the chosen key.
+   */
+  alternates: { name: string; camelot: string; relative: number }[];
   /** 12-bin average chroma over the track */
   chroma: number[];
   /** how strongly the track sticks to one key, 0..1 */
@@ -137,6 +143,8 @@ export interface CuePoint {
 /** Per-frame timelines, all sampled on the same frame rate. */
 export interface Timelines {
   frameRate: number;
+  /** time of frame 0; see Spectrogram.frameOffset */
+  frameOffset: number;
   /** 0..1 */
   energy: Float32Array;
   /** onset strength envelope */

@@ -1,18 +1,23 @@
 /** Helpers for reading analysis timelines and grids at arbitrary times. */
 
 import type { BeatGrid, CuePoint, Section, TrackAnalysis } from "../types";
-import { clamp } from "../analysis/dsp";
+import { clamp, timeToFrame } from "../analysis/dsp";
 
-export function valueAt(series: Float32Array, frameRate: number, t: number): number {
+export function valueAt(
+  series: Float32Array, frameRate: number, t: number, frameOffset = 0,
+): number {
   if (!series.length) return 0;
-  const idx = clamp(Math.round(t / frameRate), 0, series.length - 1);
+  const idx = clamp(Math.round(timeToFrame(t, frameRate, frameOffset)), 0, series.length - 1);
   return series[idx];
 }
 
-export function meanOver(series: Float32Array, frameRate: number, t0: number, t1: number): number {
+export function meanOver(
+  series: Float32Array, frameRate: number, t0: number, t1: number, frameOffset = 0,
+): number {
   if (!series.length) return 0;
-  const a = clamp(Math.floor(Math.min(t0, t1) / frameRate), 0, series.length - 1);
-  const b = clamp(Math.ceil(Math.max(t0, t1) / frameRate), a + 1, series.length);
+  const toFrame = (t: number): number => timeToFrame(t, frameRate, frameOffset);
+  const a = clamp(Math.floor(toFrame(Math.min(t0, t1))), 0, series.length - 1);
+  const b = clamp(Math.ceil(toFrame(Math.max(t0, t1))), a + 1, series.length);
   let s = 0;
   for (let i = a; i < b; i++) s += series[i];
   return s / (b - a);
@@ -60,24 +65,29 @@ export function sectionAt(track: TrackAnalysis, t: number): Section | null {
 
 /** Energy of a track at a time, 0..1. */
 export function energyAt(track: TrackAnalysis, t: number): number {
-  return valueAt(track.timelines.energy, track.timelines.frameRate, t);
+  const tl = track.timelines;
+  return valueAt(tl.energy, tl.frameRate, t, tl.frameOffset);
 }
 
 export function vocalAt(track: TrackAnalysis, t: number): number {
-  return valueAt(track.timelines.vocal, track.timelines.frameRate, t);
+  const tl = track.timelines;
+  return valueAt(tl.vocal, tl.frameRate, t, tl.frameOffset);
 }
 
 /** Mean vocal presence over a window, which is what matters for a blend. */
 export function vocalOver(track: TrackAnalysis, t0: number, t1: number): number {
-  return meanOver(track.timelines.vocal, track.timelines.frameRate, t0, t1);
+  const tl = track.timelines;
+  return meanOver(tl.vocal, tl.frameRate, t0, t1, tl.frameOffset);
 }
 
 export function energyOver(track: TrackAnalysis, t0: number, t1: number): number {
-  return meanOver(track.timelines.energy, track.timelines.frameRate, t0, t1);
+  const tl = track.timelines;
+  return meanOver(tl.energy, tl.frameRate, t0, t1, tl.frameOffset);
 }
 
 export function percussiveOver(track: TrackAnalysis, t0: number, t1: number): number {
-  return meanOver(track.timelines.percussive, track.timelines.frameRate, t0, t1);
+  const tl = track.timelines;
+  return meanOver(tl.percussive, tl.frameRate, t0, t1, tl.frameOffset);
 }
 
 /**

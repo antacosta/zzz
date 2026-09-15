@@ -14,7 +14,10 @@
  */
 
 import type { RhythmProfile } from "../types";
-import { type Spectrogram, clamp, mean, median, normalise, percentile, smooth, stddev } from "./dsp";
+import {
+  type Spectrogram, clamp, frameToTime, mean, medianInPlace, normalise, percentile,
+  smooth, stddev,
+} from "./dsp";
 
 export interface HpssResult {
   /** [frame] 0..1 percussive dominance */
@@ -26,38 +29,67 @@ export interface HpssResult {
 }
 
 /**
- * Median-filter HPSS reduced to per-frame ratios. We avoid materialising both
- * full spectrograms by streaming the frequency-direction median and keeping a
- * ring buffer for the time-direction median.
+ * Median-filter HPSS reduced to per-frame ratios.
+ *
+ * Only scalar ratios per frame are needed, not the separated spectrograms, so
+ * this takes three shortcuts that cost nothing measurable in the result and
+ * turn the most expensive stage of the analysis into a minor one:
+ *
+ *  - the medians are computed in preallocated scratch space, because an
+ *    allocation per bin per frame ran to millions of allocations per track;
+ *  - bins above `HPSS_MAX_HZ` are skipped, as they carry little of the
+ *    harmonic/percussive distinction but a large share of the bins;
+ *  - ratios are computed every `stride` frames and interpolated between. The
+ *    ratio is a smooth quantity that was already being smoothed afterwards,
+ *    while the medians themselves still look at every neighbouring frame.
  */
-export function hpss(spec: Spectrogram, timeRadius = 8, freqRadius = 8): HpssResult {
-  const { frames, bins } = spec;
+const HPSS_MAX_HZ = 8000;
+
+export function hpss(
+  spec: Spectrogram,
+  timeRadius = 8,
+  freqRadius = 8,
+  stride = 4,
+): HpssResult {
+  const { frames, bins, fftSize, sampleRate } = spec;
   const n = frames.length;
   const percussive = new Float32Array(n);
   const harmonic = new Float32Array(n);
   let percTotal = 0;
   let harmTotal = 0;
 
-  const scratch = new Float32Array(timeRadius * 2 + 1);
+  const binHz = sampleRate / fftSize;
+  const maxBin = Math.min(bins, Math.ceil(HPSS_MAX_HZ / binHz));
+  const timeScratch = new Float32Array(timeRadius * 2 + 1);
+  const freqScratch = new Float32Array(freqRadius * 2 + 1);
+  const freqMed = new Float32Array(bins);
+  const computed: number[] = [];
 
-  for (let f = 0; f < n; f++) {
+  for (let f = 0; f < n; f += stride) {
     const mag = frames[f];
     // Percussive estimate: median along frequency at this frame.
-    const freqMed = runningMedian(mag, freqRadius);
+    for (let b = 1; b < maxBin; b++) {
+      let k = 0;
+      for (let j = b - freqRadius; j <= b + freqRadius; j++) {
+        if (j < 1 || j >= maxBin) continue;
+        freqScratch[k++] = mag[j];
+      }
+      freqMed[b] = medianInPlace(freqScratch, k);
+    }
+
     let p = 0;
     let h = 0;
-    for (let b = 1; b < bins; b++) {
+    for (let b = 1; b < maxBin; b++) {
       // Harmonic estimate: median along time for this bin.
       let k = 0;
       for (let t = f - timeRadius; t <= f + timeRadius; t++) {
         if (t < 0 || t >= n) continue;
-        scratch[k++] = frames[t][b];
+        timeScratch[k++] = frames[t][b];
       }
-      const timeMed = median(scratch.subarray(0, k));
+      const hv = medianInPlace(timeScratch, k);
       const pv = freqMed[b];
-      const hv = timeMed;
       const denom = pv * pv + hv * hv + 1e-12;
-      // Wiener-style soft masks
+      // Wiener-style soft mask
       const pMask = (pv * pv) / denom;
       const e = mag[b] * mag[b];
       p += e * pMask;
@@ -68,6 +100,24 @@ export function hpss(spec: Spectrogram, timeRadius = 8, freqRadius = 8): HpssRes
     harmonic[f] = h / tot;
     percTotal += p;
     harmTotal += h;
+    computed.push(f);
+  }
+
+  // Fill the strided gaps by interpolating between computed frames.
+  for (let i = 0; i + 1 < computed.length; i++) {
+    const f0 = computed[i];
+    const f1 = computed[i + 1];
+    for (let f = f0 + 1; f < f1; f++) {
+      const w = (f - f0) / (f1 - f0);
+      percussive[f] = percussive[f0] * (1 - w) + percussive[f1] * w;
+      harmonic[f] = harmonic[f0] * (1 - w) + harmonic[f1] * w;
+    }
+  }
+  // And hold the last computed value through any tail.
+  const last = computed[computed.length - 1] ?? 0;
+  for (let f = last + 1; f < n; f++) {
+    percussive[f] = percussive[last];
+    harmonic[f] = harmonic[last];
   }
 
   return {
@@ -75,21 +125,6 @@ export function hpss(spec: Spectrogram, timeRadius = 8, freqRadius = 8): HpssRes
     harmonic: smooth(harmonic, 3),
     percussiveRatio: percTotal / (percTotal + harmTotal + 1e-12),
   };
-}
-
-function runningMedian(x: Float32Array, radius: number): Float32Array {
-  const n = x.length;
-  const out = new Float32Array(n);
-  const scratch = new Float32Array(radius * 2 + 1);
-  for (let i = 0; i < n; i++) {
-    let k = 0;
-    for (let j = i - radius; j <= i + radius; j++) {
-      if (j < 0 || j >= n) continue;
-      scratch[k++] = x[j];
-    }
-    out[i] = median(scratch.subarray(0, k));
-  }
-  return out;
 }
 
 /**
@@ -192,6 +227,7 @@ export function rhythmProfile(
   beats: Float32Array,
   frameRate: number,
   percussiveRatio: number,
+  frameOffset = 0,
 ): RhythmProfile {
   if (beats.length < 8) {
     return {
@@ -213,27 +249,46 @@ export function rhythmProfile(
   const duration = beats[beats.length - 1] - beats[0];
   const onsetDensity = duration > 0 ? onsets / (duration / mu) : 0;
 
-  // Syncopation and swing: where does onset energy land inside each beat?
-  // 8 sub-positions per beat.
-  const SUB = 8;
+  // Where do onsets land inside each beat? Twelve subdivisions resolve both the
+  // sixteenth-note grid (0, 3, 6, 9) and the triplet positions (4, 8), which is
+  // what distinguishes a swung eighth from a straight one.
+  //
+  // Only detected onset *peaks* are counted, not the envelope frame by frame.
+  // The envelope has a noise floor spread across every frame, so integrating it
+  // would spread roughly a third of the total across the four on-grid positions
+  // whatever the rhythm is, and report every track as heavily syncopated.
+  // Peaks are also assigned to their nearest subdivision rather than the
+  // subdivisions being point-sampled: an onset is a few frames wide while a
+  // subdivision at 128 BPM is only 39 ms, so sampling counts one kick several
+  // times over.
+  const SUB = 12;
   const histogram = new Float32Array(SUB);
-  for (let i = 0; i < beats.length - 1; i++) {
-    const t0 = beats[i];
-    const span = beats[i + 1] - t0;
-    if (span <= 0) continue;
-    for (let s = 0; s < SUB; s++) {
-      const t = t0 + (span * s) / SUB;
-      const idx = Math.round(t / frameRate);
-      if (idx >= 0 && idx < onset.length) histogram[s] += onset[idx];
-    }
+  let beatIdx = 0;
+  for (let f = 1; f < onset.length - 1; f++) {
+    if (onset[f] < thresh) continue;
+    if (onset[f] < onset[f - 1] || onset[f] <= onset[f + 1]) continue;
+    const t = frameToTime(f, frameRate, frameOffset);
+    while (beatIdx < beats.length - 2 && beats[beatIdx + 1] <= t) beatIdx++;
+    const t0 = beats[beatIdx];
+    const span = beats[beatIdx + 1] - t0;
+    if (span <= 0 || t < t0) continue;
+    const phase = (t - t0) / span;
+    if (phase < 0 || phase >= 1) continue;
+    histogram[Math.round(phase * SUB) % SUB] += onset[f];
   }
   const total = histogram.reduce((a, b) => a + b, 0) || 1e-9;
-  const onGrid = histogram[0] + histogram[2] + histogram[4] + histogram[6];
+  // Sixteenth-note positions.
+  const onGrid = histogram[0] + histogram[3] + histogram[6] + histogram[9];
   const syncopation = clamp(1 - onGrid / total, 0, 1);
-  // Swing: energy at the triplet position (index ~5.33 of 8) vs the straight 8th (index 4... use 2nd 8th).
-  const straight8 = histogram[2] + histogram[6];
-  const swung = histogram[3] + histogram[7];
-  const swing = clamp(swung / (straight8 + swung + 1e-9) - 0.35, 0, 1) * 0.5;
+  // Swing: does the second eighth of each beat sit straight (6/12) or on the
+  // triplet (8/12)? Comparing those two positions directly means a pattern
+  // with nothing at either reads as no swing rather than as noise.
+  const straightEighth = histogram[6];
+  const swungEighth = histogram[8];
+  const swing = clamp(
+    (swungEighth - straightEighth) / (swungEighth + straightEighth + 1e-9),
+    0, 1,
+  );
 
   const danceability = clamp(
     0.40 * pulseClarity + 0.25 * clamp(percussiveRatio * 1.8, 0, 1) +

@@ -87,6 +87,14 @@ export interface Spectrogram {
   sampleRate: number;
   /** seconds per frame */
   frameRate: number;
+  /**
+   * Time of frame 0, in seconds. Each frame is timestamped at the centre of its
+   * analysis window rather than its start, which is the standard convention and
+   * the one that matters here: a window-start timestamp reports every onset
+   * half a window early, which on a 2048-point window is enough to throw the
+   * beat grid off by a third of a sixteenth note.
+   */
+  frameOffset: number;
 }
 
 /** Magnitude STFT of a mono signal. */
@@ -117,7 +125,11 @@ export function stft(
     frames[f] = mag;
   }
 
-  return { frames, bins, hop, fftSize, sampleRate, frameRate: hop / sampleRate };
+  return {
+    frames, bins, hop, fftSize, sampleRate,
+    frameRate: hop / sampleRate,
+    frameOffset: fftSize / 2 / sampleRate,
+  };
 }
 
 /** Downmix an AudioBuffer-like channel set to mono. */
@@ -131,9 +143,46 @@ export function toMono(channels: Float32Array[]): Float32Array {
   return out;
 }
 
-/** Linear-interpolating resampler; adequate for feature extraction (not playback). */
+/**
+ * Second-order low-pass coefficients (RBJ cookbook), normalised for `biquad`.
+ */
+export function lowpassCoeffs(
+  cutoffHz: number,
+  sampleRate: number,
+  q = Math.SQRT1_2,
+): [number, number, number, number, number] {
+  const w0 = (2 * Math.PI * Math.min(cutoffHz, sampleRate * 0.49)) / sampleRate;
+  const cos = Math.cos(w0);
+  const alpha = Math.sin(w0) / (2 * q);
+  const a0 = 1 + alpha;
+  return [
+    ((1 - cos) / 2) / a0,
+    (1 - cos) / a0,
+    ((1 - cos) / 2) / a0,
+    (-2 * cos) / a0,
+    (1 - alpha) / a0,
+  ];
+}
+
+/**
+ * Resampler for feature extraction (not playback).
+ *
+ * Decimation is preceded by a fourth-order Butterworth low-pass. Without it,
+ * everything above the new Nyquist folds back into the analysed band: going
+ * from 44.1 kHz to 22.05 kHz aliases the whole top octave downwards, which
+ * shifts the spectral centroid, brightness and flatness, and makes those
+ * measurements depend on the file's sample rate rather than on the music.
+ */
 export function resample(signal: Float32Array, from: number, to: number): Float32Array {
   if (from === to) return signal;
+  if (to < from) {
+    const cutoff = to * 0.45;
+    // Two cascaded biquads with Butterworth Qs give a fourth-order response.
+    for (const q of [0.5412, 1.3065]) {
+      const [b0, b1, b2, a1, a2] = lowpassCoeffs(cutoff, from, q);
+      signal = biquad(signal, b0, b1, b2, a1, a2);
+    }
+  }
   const ratio = from / to;
   const n = Math.floor(signal.length / ratio);
   const out = new Float32Array(n);
@@ -158,10 +207,31 @@ export function medianFilter(x: Float32Array, radius: number): Float32Array {
       if (j < 0 || j >= n) continue;
       scratch[k++] = x[j];
     }
-    const slice = scratch.subarray(0, k);
-    out[i] = median(slice);
+    out[i] = medianInPlace(scratch, k);
   }
   return out;
+}
+
+/**
+ * Median of the first `len` entries of `buf`, by insertion sort, in place.
+ *
+ * Unlike `median` below this allocates nothing, which matters a great deal in
+ * the median-filter inner loops: those call it once per bin per frame, millions
+ * of times over a track, and an allocation per call dominated the whole
+ * analysis. `buf` is scrambled on return, so callers pass scratch space.
+ */
+export function medianInPlace(buf: Float32Array, len: number): number {
+  for (let i = 1; i < len; i++) {
+    const v = buf[i];
+    let j = i - 1;
+    while (j >= 0 && buf[j] > v) {
+      buf[j + 1] = buf[j];
+      j--;
+    }
+    buf[j + 1] = v;
+  }
+  if (len === 0) return 0;
+  return len & 1 ? buf[len >> 1] : (buf[(len >> 1) - 1] + buf[len >> 1]) / 2;
 }
 
 export function median(values: ArrayLike<number>): number {
@@ -242,6 +312,16 @@ export function biquad(
     y[i] = out;
   }
   return y;
+}
+
+/** Time of a frame index, given a frame rate and the frame-0 offset. */
+export function frameToTime(frame: number, frameRate: number, frameOffset: number): number {
+  return frameOffset + frame * frameRate;
+}
+
+/** Fractional frame index for a time. Callers round or floor as they need. */
+export function timeToFrame(time: number, frameRate: number, frameOffset: number): number {
+  return (time - frameOffset) / frameRate;
 }
 
 export function clamp(v: number, lo: number, hi: number): number {

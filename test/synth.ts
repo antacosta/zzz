@@ -8,6 +8,22 @@ export interface Synth {
 const NOTE_HZ = (midi: number) => 440 * 2 ** ((midi - 69) / 12);
 
 /**
+ * Deterministic PRNG (mulberry32). The hat bursts and the noise floor need to
+ * be reproducible, or the analysis tests report different numbers on every run
+ * and nothing can be tuned or trusted.
+ */
+function rng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
  * A four-on-the-floor loop with a kick, offbeat hat, a sustained triad and an
  * optional centre-panned "vocal" melody, so tests can check tempo, key,
  * downbeat phase and vocal detection independently.
@@ -19,10 +35,20 @@ export function makeTrack(opts: {
   chord: number[];
   sampleRate?: number;
   vocal?: boolean;
+  /** PRNG seed, so a given spec always produces identical samples */
+  seed?: number;
   /** silence the drums for the first N bars to create an intro */
   introBars?: number;
+  /**
+   * Include the offbeat noise hats. Turn them off when comparing analyses
+   * across sample rates: the noise is drawn per sample, so two rates produce
+   * genuinely different signals and the comparison would measure the fixture
+   * rather than the analysis.
+   */
+  hats?: boolean;
 }): Synth {
   const sampleRate = opts.sampleRate ?? 44100;
+  const rand = rng(opts.seed ?? 0x5eed);
   const n = Math.floor(sampleRate * opts.seconds);
   const l = new Float32Array(n);
   const r = new Float32Array(n);
@@ -44,12 +70,14 @@ export function makeTrack(opts: {
       r[start + i] += v;
     }
     // offbeat hat: filtered noise burst
-    const hatStart = Math.floor((t + beat / 2) * sampleRate);
-    for (let i = 0; i < sampleRate * 0.05 && hatStart + i < n; i++) {
-      const env = Math.exp(-i / (sampleRate * 0.008));
-      const v = (Math.random() * 2 - 1) * env * 0.16;
-      l[hatStart + i] += v * 0.9;
-      r[hatStart + i] += v * 1.1;
+    if (opts.hats !== false) {
+      const hatStart = Math.floor((t + beat / 2) * sampleRate);
+      for (let i = 0; i < sampleRate * 0.05 && hatStart + i < n; i++) {
+        const env = Math.exp(-i / (sampleRate * 0.008));
+        const v = (rand() * 2 - 1) * env * 0.16;
+        l[hatStart + i] += v * 0.9;
+        r[hatStart + i] += v * 1.1;
+      }
     }
   }
 
