@@ -18,6 +18,7 @@ try {
     logLevel: "error",
   });
   await import(pathToFileURL(outfile).href);
+  await import(pathToFileURL(join(process.cwd(), "test/worklet-run.mjs")).href);
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
